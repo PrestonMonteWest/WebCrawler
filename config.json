@@ -1,0 +1,7 @@
+{
+    "thread_num": 4,
+    "database_info": {
+	"database": "crawler",
+	"user": "preston"
+    }
+}

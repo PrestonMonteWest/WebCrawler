@@ -2,9 +2,13 @@
 
 from urllib.parse import urlparse, urlunparse, urljoin
 from html.parser import HTMLParser
-import pgdb
+
+import psycopg2
 import requests
 import threading
+import json
+import os
+
 
 class MyHTMLParser(HTMLParser):
     def __init__(self, *, convert_charrefs=True):
@@ -16,13 +20,6 @@ class MyHTMLParser(HTMLParser):
                 if attr[0] == "href":
                     self.hrefs.append(attr[1])
                     break
-
-def connect():
-    """
-    Return a connection to the urls database.
-    """
-
-    return pgdb.connect(database="urls", user="preston")
 
 def get_response(url):
     """
@@ -85,36 +82,35 @@ def insert_pages(url, conn = None):
             conn.close()
 
         return
-
+    
     parser = MyHTMLParser()
     parser.feed(resp.text)
-
+    
     process = lambda href: urlunparse(
         # remove fragments and query string
         urlparse(href)._replace(query="", fragment="")
     )
+    
     # remove redundancy
     hrefs = set(list(map(process, parser.hrefs)))
     for href in hrefs:
         link_url = urljoin(url, href)
         scheme = urlparse(link_url).scheme
-        bad_scheme = scheme and scheme != "http" and scheme != "https"
+        bad_scheme = not scheme or (scheme != "http" and scheme != "https")
         if url == link_url or bad_scheme:
             continue
-
         try:
             cursor.execute("insert into page(url) values(%s)", (link_url,))
         except pgdb.IntegrityError:
             conn.rollback()
-
         try:
-            cursor.execute("insert into links values(%s, %s)", (url, link_url))
+            cursor.execute("insert into link values(%s, %s)", (url, link_url))
         except pgdb.IntegrityError:
             conn.rollback()
             continue
-
+        
         conn.commit()
-
+        
     cursor.execute("update page set last_check = now() where url = %s", (url,))
     print("'{}' has been resolved.".format(url))
     conn.commit()
@@ -125,14 +121,18 @@ def insert_pages(url, conn = None):
     if close_conn:
         conn.close()
 
-if __name__ == "__main__":
-    conn = connect()
-    thread_num = 8
+
+def main():
+    with open("config.json") as config_file:
+        config = json.load(config_file)
+
+    conn = psycopg2.connect(**config['database_info'])
+    thread_num = config['thread_num']
 
     while True:
         threads = []
         urls = conn.cursor().execute(
-            "select url from page where last_check is null limit %i",
+            "select url from page where last_check is null limit %s",
             (thread_num,)
         )
 
@@ -153,3 +153,7 @@ if __name__ == "__main__":
 
     urls.close()
     conn.close()
+
+
+if __name__ == "__main__":
+    main()
