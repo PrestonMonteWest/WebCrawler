@@ -2,20 +2,44 @@
 
 from urllib.parse import urlparse, urlunparse, urljoin
 from anchorparser import AnchorParser
+from multiprocessing import cpu_count
 
-import psycopg2 as psql
-import requests
+import importlib
 import threading
+import requests
 import json
 import os
 
 
-# Globals Config - (These should be overridden)
-thread_num = 8
-database_info = {
-    'user': 'pi',
-    'database': 'crawler',
-}
+try:
+    with open('config.json') as config_file:
+        config = json.load(config_file)
+except FileNotFoundError as ex:
+    print(ex)
+    config = {}
+
+thread_num = config.get('thread_num')
+if not thread_num:
+    thread_num = 2 * cpu_count
+    
+debug = config.get('debug')
+if not debug:
+    debug = True
+
+database = config.get('database_info')
+if not database:
+    database = {}
+    database['info'] = {
+        'user': 'preston',
+        'database': 'crawler',
+    }
+
+    if debug:
+        database['engine'] = 'sqlite3'
+    else:
+        database['engine'] = 'psycopg2'
+
+sql_lib = importlib.import_module(database['engine'])
 
 
 def get_response(url):
@@ -47,11 +71,11 @@ def insert_pages(url, conn = None):
     """
 
     resp = get_response(url)
-    is_not_html = not resp.headers["content-type"].startswith("text/html")
+    is_not_html = not resp.headers['content-type'].startswith('text/html')
 
     close_conn = False
     if not conn:
-        conn = psql.connect(**database_info)
+        conn = sql_lib.connect(**database['info'])
         close_conn = True
 
     cursor = conn.cursor()
@@ -59,9 +83,9 @@ def insert_pages(url, conn = None):
     if url != resp.url:
         try:
             cursor.execute(
-                "update page set url = %s where url = %s", (resp.url, url)
+                'update page set url = %s where url = %s', (resp.url, url)
             )
-        except psql.IntegrityError as err:
+        except sql_lib.IntegrityError as err:
             conn.rollback()
             delete_url(url, cursor, conn)
             cursor.close()
@@ -98,11 +122,11 @@ def insert_pages(url, conn = None):
             continue
         try:
             cursor.execute("insert into page(url) values(%s)", (link_url,))
-        except psql.IntegrityError:
+        except sql_lib.IntegrityError:
             conn.rollback()
         try:
             cursor.execute("insert into anchor values(%s, %s)", (url, link_url))
-        except psql.IntegrityError:
+        except sql_lib.IntegrityError:
             conn.rollback()
             continue
         
@@ -120,13 +144,8 @@ def insert_pages(url, conn = None):
 
 
 def main():
-    global thread_num, database_info
-    with open("config.json") as config_file:
-        config = json.load(config_file)
-
-    thread_num = config['thread_num']
-    database_info = config['database_info']
-    conn = psql.connect(**database_info)
+    global thread_num, database
+    conn = sql_lib.connect(**database['info'])
     conn.set_session(autocommit=True)
 
     cursor = conn.cursor()
