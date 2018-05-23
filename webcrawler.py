@@ -1,25 +1,22 @@
 #!/usr/bin/env python3
 
 from urllib.parse import urlparse, urlunparse, urljoin
-from html.parser import HTMLParser
+from anchorparser import AnchorParser
 
-import psycopg2
+import psycopg2 as psql
 import requests
 import threading
 import json
 import os
 
 
-class MyHTMLParser(HTMLParser):
-    def __init__(self, *, convert_charrefs=True):
-        HTMLParser.__init__(self)
-        self.hrefs = []
-    def handle_starttag(self, tag, attrs):
-        if tag == 'a':
-            for attr in attrs:
-                if attr[0] == "href":
-                    self.hrefs.append(attr[1])
-                    break
+# Globals Config - (These should be overridden)
+thread_num = 8
+database_info = {
+    'user': 'pi',
+    'database': 'crawler',
+}
+
 
 def get_response(url):
     """
@@ -54,7 +51,7 @@ def insert_pages(url, conn = None):
 
     close_conn = False
     if not conn:
-        conn = connect()
+        conn = psql.connect(**database_info)
         close_conn = True
 
     cursor = conn.cursor()
@@ -64,7 +61,7 @@ def insert_pages(url, conn = None):
             cursor.execute(
                 "update page set url = %s where url = %s", (resp.url, url)
             )
-        except pgdb.IntegrityError as err:
+        except psql.IntegrityError as err:
             conn.rollback()
             delete_url(url, cursor, conn)
             cursor.close()
@@ -83,7 +80,7 @@ def insert_pages(url, conn = None):
 
         return
     
-    parser = MyHTMLParser()
+    parser = AnchorParser()
     parser.feed(resp.text)
     
     process = lambda href: urlunparse(
@@ -101,11 +98,11 @@ def insert_pages(url, conn = None):
             continue
         try:
             cursor.execute("insert into page(url) values(%s)", (link_url,))
-        except pgdb.IntegrityError:
+        except psql.IntegrityError:
             conn.rollback()
         try:
-            cursor.execute("insert into link values(%s, %s)", (url, link_url))
-        except pgdb.IntegrityError:
+            cursor.execute("insert into anchor values(%s, %s)", (url, link_url))
+        except psql.IntegrityError:
             conn.rollback()
             continue
         
@@ -123,27 +120,36 @@ def insert_pages(url, conn = None):
 
 
 def main():
+    global thread_num, database_info
     with open("config.json") as config_file:
         config = json.load(config_file)
 
-    conn = psycopg2.connect(**config['database_info'])
     thread_num = config['thread_num']
+    database_info = config['database_info']
+    conn = psql.connect(**database_info)
+    conn.set_session(autocommit=True)
+
+    cursor = conn.cursor()
 
     while True:
         threads = []
-        urls = conn.cursor().execute(
+        cursor.execute(
             "select url from page where last_check is null limit %s",
             (thread_num,)
         )
 
+        urls = cursor.fetchall()
+        if not urls:
+            break
+
         url = None
         for url in urls:
-            myThread = threading.Thread(
-                target=insert_pages, args=(url[0],)
+            URL_thread = threading.Thread(
+                target=insert_pages, args=(url[0], conn)
             )
             print("Resolving '{}'...".format(url[0]))
-            myThread.start()
-            threads.append(myThread)
+            URL_thread.start()
+            threads.append(URL_thread)
 
         if not url:
             break
@@ -151,7 +157,6 @@ def main():
         for thread in threads:
             thread.join()
 
-    urls.close()
     conn.close()
 
 
